@@ -138,6 +138,7 @@ export function awsLambdaStreamingRequestHandler<
     };
 
     let isStream = false;
+    let hasEnded = false;
     let formatter: ReturnType<typeof getBatchStreamFormatter>;
 
     const unstable_onHead = (head: HTTPResponse, isStreaming: boolean) => {
@@ -170,6 +171,7 @@ export function awsLambdaStreamingRequestHandler<
          * - if response is empty (HEAD request)
          */
         responseStream.end(string);
+        hasEnded = true;
       } else {
         responseStream.write(formatter(index, string));
       }
@@ -193,10 +195,9 @@ export function awsLambdaStreamingRequestHandler<
       unstable_onChunk,
     });
 
-    if (isStream) {
+    if (isStream && !hasEnded) {
       responseStream.write(formatter!.end());
       responseStream.end();
-      return;
     }
   };
 }
