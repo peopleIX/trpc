@@ -142,24 +142,17 @@ export function awsLambdaStreamingRequestHandler<
     let formatter: ReturnType<typeof getBatchStreamFormatter>;
 
     const unstable_onHead = (head: HTTPResponse, isStreaming: boolean) => {
-      const metadata = {
-        statusCode: 200,
-        headers: {} as APIGatewayResult['headers'],
-      }
-
-      const headers = transformHeaders(head.headers ?? {});
-      if (!headers) throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to transform headers',
-      });
-
       if (isStreaming) {
+        const headers = transformHeaders(head.headers ?? {}) ?? {};
         headers['Transfer-Encoding'] = 'chunked';
         const vary = headers.Vary;
         headers.Vary = vary ? 'trpc-batch-mode, ' + vary : 'trpc-batch-mode';
         isStream = true;
         formatter = getBatchStreamFormatter();;
-        responseStream = awslambda.HttpResponseStream.from(responseStream, metadata);
+        responseStream = awslambda.HttpResponseStream.from(responseStream, {
+          statusCode: head.status,
+          headers,
+        });
       }
     };
 
