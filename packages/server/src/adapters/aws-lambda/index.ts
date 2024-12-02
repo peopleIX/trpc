@@ -24,6 +24,7 @@ import {
   transformHeaders,
   UNKNOWN_PAYLOAD_FORMAT_VERSION_ERROR_MESSAGE,
 } from './utils';
+import { Readable } from 'node:stream';
 
 export * from './utils';
 
@@ -122,13 +123,17 @@ export function awsLambdaRequestHandler<
   };
 }
 
+type StreamingAPIGatewayProxyStructuredResultV2 = Omit<APIGatewayProxyStructuredResultV2, 'body'> & {
+  body: APIGatewayProxyStructuredResultV2['body'] | Readable;
+} | string;
+
 export function awsLambdaStreamingRequestHandler<
   TRouter extends AnyRouter,
   TEvent extends APIGatewayEvent,
 >(
   opts: AWSLambdaOptions<TRouter, TEvent>,
-): (event: TEvent, responseStream: awslambda.ResponseStream, context: APIGWContext) => Promise<void> {
-  return async (event, responseStream, context) => {
+): (event: TEvent, context: APIGWContext) => Promise<StreamingAPIGatewayProxyStructuredResultV2> {
+  return async (event, context) => {
     const req = lambdaEventToHTTPRequest(event);
     const path = getPath(event);
     const createContext = async function _createContext(): Promise<
@@ -137,8 +142,11 @@ export function awsLambdaStreamingRequestHandler<
       return await opts.createContext?.({ event, context });
     };
 
+    let resolve: (value: StreamingAPIGatewayProxyStructuredResultV2) => void;
+    const promise = new Promise<StreamingAPIGatewayProxyStructuredResultV2>((r) => (resolve = r));
+
     let isStream = false;
-    let hasEnded = false;
+    let stream: Readable;
     let formatter: ReturnType<typeof getBatchStreamFormatter>;
 
     const unstable_onHead = (head: HTTPResponse, isStreaming: boolean) => {
@@ -149,10 +157,15 @@ export function awsLambdaStreamingRequestHandler<
         headers.Vary = vary ? 'trpc-batch-mode, ' + vary : 'trpc-batch-mode';
         isStream = true;
         formatter = getBatchStreamFormatter();;
-        responseStream = awslambda.HttpResponseStream.from(responseStream, {
-          statusCode: head.status,
-          headers,
-        });
+        stream = new Readable();
+        stream._read = () => { }; // eslint-disable-line @typescript-eslint/no-empty-function -- https://github.com/fastify/fastify/issues/805#issuecomment-369172154
+        resolve(
+          {
+            statusCode: head.status,
+            headers,
+            body: stream,
+          }
+        );
       }
     };
 
@@ -163,14 +176,13 @@ export function awsLambdaStreamingRequestHandler<
          * - if the response is an error
          * - if response is empty (HEAD request)
          */
-        responseStream.end(string);
-        hasEnded = true;
+        resolve(string)
       } else {
-        responseStream.write(formatter(index, string));
+        stream.push(formatter(index, string));
       }
     };
 
-    await resolveHTTPResponse({
+    resolveHTTPResponse({
       router: opts.router,
       batching: opts.batching,
       responseMeta: opts?.responseMeta,
@@ -186,11 +198,19 @@ export function awsLambdaStreamingRequestHandler<
       },
       unstable_onHead,
       unstable_onChunk,
-    });
+    })
+      .then(() => {
+        if (isStream) {
+          stream.push(formatter.end());
+          stream.push(null); // https://github.com/fastify/fastify/issues/805#issuecomment-369172154
+        }
+      })
+      .catch(() => {
+        if (isStream) {
+          stream.push(null);
+        }
+      });
 
-    if (isStream && !hasEnded) {
-      responseStream.write(formatter!.end());
-      responseStream.end();
-    }
+    return promise;
   };
 }
